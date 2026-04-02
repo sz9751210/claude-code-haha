@@ -11,5 +11,8 @@ export function buildGeminiBootstrapPrompt(): string {
     '- if tool_calls is non-empty, final_text can be empty',
     '- tool call names must exactly match provided tool names',
     '- do not add extra top-level fields',
+    'Acknowledge this bootstrap request now.',
+    'Return exactly this JSON object:',
+    '{"type":"assistant_turn","tool_calls":[],"final_text":"BOOTSTRAP_OK"}',
   ].join('\n')
 }

@@ -20,6 +20,11 @@ export class GeminiResponseWaiter {
   constructor(
     private readonly pollIntervalMs = GEMINI_RESPONSE_POLL_INTERVAL_MS,
     private readonly quietWindowMs = GEMINI_RESPONSE_QUIET_WINDOW_MS,
+    private readonly stickyGeneratingWindowMs = Math.max(
+      GEMINI_RESPONSE_QUIET_WINDOW_MS * 4,
+      6_000,
+    ),
+    private readonly now: () => number = () => Date.now(),
   ) {}
 
   async getLatestResponseText(page: GeminiPageLike): Promise<string> {
@@ -34,13 +39,13 @@ export class GeminiResponseWaiter {
     baselineText?: string
   }): Promise<string> {
     const timeoutMs = args.timeoutMs ?? getGeminiResponseTimeoutMs()
-    const deadline = Date.now() + timeoutMs
+    const deadline = this.now() + timeoutMs
     const baseline = (args.baselineText ?? '').trim()
 
     let stableSince = 0
     let latest = baseline
 
-    while (Date.now() < deadline) {
+    while (this.now() < deadline) {
       if (args.signal?.aborted) {
         throw new Error('Gemini Web request aborted')
       }
@@ -59,15 +64,23 @@ export class GeminiResponseWaiter {
       const text = snapshot.latestResponseText.trim()
       if (text !== latest) {
         latest = text
-        stableSince = Date.now()
+        stableSince = this.now()
       } else if (stableSince === 0 && text.length > 0) {
-        stableSince = Date.now()
+        stableSince = this.now()
       }
 
       const hasNewText = text.length > 0 && text !== baseline
-      const isStable = stableSince > 0 && Date.now() - stableSince >= this.quietWindowMs
-      if (hasNewText && !snapshot.isGenerating && isStable) {
-        return text
+      const stableForMs = stableSince > 0 ? this.now() - stableSince : 0
+      if (hasNewText && stableForMs >= this.quietWindowMs) {
+        if (!snapshot.isGenerating) {
+          return text
+        }
+
+        // Some Gemini variants keep a visible "stop generating" control after
+        // output is already complete. Treat long stability as completion.
+        if (stableForMs >= this.stickyGeneratingWindowMs) {
+          return text
+        }
       }
 
       await args.page.waitForTimeout(this.pollIntervalMs)
@@ -91,6 +104,8 @@ export class GeminiResponseWaiter {
 
       const stopSelectors = [
         'button[aria-label*="Stop"]',
+        'button[aria-label*="stop"]',
+        'button[aria-label*="停止"]',
         '[data-testid*="stop"]',
       ]
 

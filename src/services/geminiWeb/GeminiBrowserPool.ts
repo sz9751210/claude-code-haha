@@ -31,6 +31,9 @@ const SEND_BUTTON_SELECTORS = [
   'button[data-testid*="send"]',
 ]
 
+const PROMPT_INPUT_DISCOVERY_TIMEOUT_MS = 20_000
+const PROMPT_INPUT_RETRY_INTERVAL_MS = 300
+
 function getGeminiHeadless(): boolean {
   return isEnvTruthy(process.env[GEMINI_WEB_HEADLESS_ENV])
 }
@@ -165,6 +168,41 @@ export class GeminiBrowserPool {
   }
 
   private async fillPromptInput(page: Page, prompt: string): Promise<void> {
+    const deadline = Date.now() + PROMPT_INPUT_DISCOVERY_TIMEOUT_MS
+
+    while (Date.now() < deadline) {
+      const filled = await this.tryFillPromptInput(page, prompt)
+      if (filled) {
+        return
+      }
+
+      await page.waitForTimeout(PROMPT_INPUT_RETRY_INTERVAL_MS)
+    }
+
+    const diagnostics = await page
+      .evaluate(() => {
+        const bodyText = (document.body?.innerText ?? '').toLowerCase()
+        const signInDetected =
+          bodyText.includes('sign in') || bodyText.includes('登入')
+
+        return {
+          url: window.location.href,
+          title: document.title,
+          signInDetected,
+        }
+      })
+      .catch(() => null)
+
+    const diagnosticMessage = diagnostics
+      ? ` (url: ${diagnostics.url}, title: ${diagnostics.title}, signInDetected: ${diagnostics.signInDetected})`
+      : ''
+
+    throw new Error(
+      `Unable to locate Gemini prompt input after ${PROMPT_INPUT_DISCOVERY_TIMEOUT_MS}ms. Ensure Gemini page is loaded.${diagnosticMessage}`,
+    )
+  }
+
+  private async tryFillPromptInput(page: Page, prompt: string): Promise<boolean> {
     for (const selector of PROMPT_INPUT_SELECTORS) {
       const candidates = page.locator(selector)
       const count = await candidates.count()
@@ -177,7 +215,24 @@ export class GeminiBrowserPool {
         try {
           await locator.waitFor({ state: 'visible', timeout: 1_500 })
           await locator.click({ timeout: 2_500 })
+
+          try {
+            await locator.fill(prompt, { timeout: 1_500 })
+          } catch {
+            // Some Gemini variants expose non-fillable editors; fallback below.
+          }
+
           const filled = await locator.evaluate((node, value) => {
+            const currentText =
+              node instanceof HTMLInputElement ||
+              node instanceof HTMLTextAreaElement
+                ? node.value
+                : node.textContent ?? ''
+
+            if (currentText.trim().length > 0) {
+              return true
+            }
+
             if (
               node instanceof HTMLTextAreaElement ||
               node instanceof HTMLInputElement
@@ -199,7 +254,7 @@ export class GeminiBrowserPool {
           }, prompt)
 
           if (filled) {
-            return
+            return true
           }
         } catch {
           continue
@@ -207,9 +262,7 @@ export class GeminiBrowserPool {
       }
     }
 
-    throw new Error(
-      'Unable to locate Gemini prompt input. Ensure Gemini page is loaded.',
-    )
+    return false
   }
 
   private async submitPrompt(page: Page): Promise<void> {
