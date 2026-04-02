@@ -199,6 +199,10 @@ bun --env-file=.env ./src/localRecoveryCli.ts
 
 首次使用请先在持久化 profile 下手动登录 Google 账号一次，后续会自动复用本地登录态。
 
+如果 profile 尚未登录，Gemini Web 路径会快速返回：
+
+`Gemini Web sign-in required. Complete one-time login in the configured profile and retry.`
+
 ---
 
 ## 降级模式

@@ -18,6 +18,9 @@ import {
 import { GeminiTabRateLimiter } from './GeminiTabRateLimiter.js'
 
 const PROMPT_INPUT_SELECTORS = [
+  'div[role="textbox"][contenteditable="true"][aria-label*="prompt"]',
+  'div[role="textbox"][contenteditable="true"][aria-label*="Prompt"]',
+  'div[role="textbox"][contenteditable="true"]',
   'textarea[aria-label*="prompt"]',
   'textarea[aria-label*="Gemini"]',
   'textarea',
@@ -149,6 +152,7 @@ export class GeminiBrowserPool {
     signal?: AbortSignal
   }): Promise<string> {
     await this.ensureGeminiUrl(args.page)
+    await this.assertSignedIn(args.page)
     const baseline = await this.responseWaiter.getLatestResponseText(args.page)
     await this.fillPromptInput(args.page, args.prompt)
     await this.submitPrompt(args.page)
@@ -173,44 +177,89 @@ export class GeminiBrowserPool {
 
   private async fillPromptInput(page: Page, prompt: string): Promise<void> {
     for (const selector of PROMPT_INPUT_SELECTORS) {
-      const locator = page.locator(selector).first()
-      if ((await locator.count()) === 0) {
+      const candidates = page.locator(selector)
+      const count = await candidates.count()
+      if (count === 0) {
         continue
       }
 
-      try {
-        await locator.waitFor({ state: 'visible', timeout: 8_000 })
-        await locator.click({ timeout: 8_000 })
-        const filled = await locator.evaluate((node, value) => {
-          if (
-            node instanceof HTMLTextAreaElement ||
-            node instanceof HTMLInputElement
-          ) {
-            node.value = value
-            node.dispatchEvent(new Event('input', { bubbles: true }))
-            return true
+      for (let i = 0; i < count; i++) {
+        const locator = candidates.nth(i)
+        try {
+          await locator.waitFor({ state: 'visible', timeout: 1_500 })
+          await locator.click({ timeout: 2_500 })
+          const filled = await locator.evaluate((node, value) => {
+            if (
+              node instanceof HTMLTextAreaElement ||
+              node instanceof HTMLInputElement
+            ) {
+              node.value = value
+              node.dispatchEvent(new Event('input', { bubbles: true }))
+              node.dispatchEvent(new Event('change', { bubbles: true }))
+              return node.value.trim().length > 0
+            }
+
+            if (node instanceof HTMLElement && node.isContentEditable) {
+              node.textContent = value
+              node.dispatchEvent(new Event('beforeinput', { bubbles: true }))
+              node.dispatchEvent(new Event('input', { bubbles: true }))
+              return (node.textContent ?? '').trim().length > 0
+            }
+
+            return false
+          }, prompt)
+
+          if (filled) {
+            return
           }
-
-          if (node instanceof HTMLElement && node.isContentEditable) {
-            node.textContent = value
-            node.dispatchEvent(new Event('input', { bubbles: true }))
-            return true
-          }
-
-          return false
-        }, prompt)
-
-        if (filled) {
-          return
+        } catch {
+          continue
         }
-      } catch {
-        continue
       }
+    }
+
+    const signInDetected = await page.evaluate(() => {
+      const nodes = Array.from(document.querySelectorAll('a,button'))
+      return nodes.some(node => {
+        const text = (node.textContent ?? '').toLowerCase()
+        const aria = (node.getAttribute('aria-label') ?? '').toLowerCase()
+        return text.includes('sign in') || aria.includes('sign in')
+      })
+    })
+
+    if (signInDetected) {
+      throw new Error(
+        'Gemini Web sign-in required. Complete one-time login in the configured profile and retry.',
+      )
     }
 
     throw new Error(
       'Unable to locate Gemini prompt input. Ensure Gemini page is loaded and logged in.',
     )
+  }
+
+  private async assertSignedIn(page: Page): Promise<void> {
+    const signInDetected = await page.evaluate(() => {
+      const signInLink = document.querySelector(
+        'a[aria-label="Sign in"], a[href*="accounts.google.com/ServiceLogin"]',
+      )
+      if (signInLink) {
+        return true
+      }
+
+      const buttons = Array.from(document.querySelectorAll('button,a'))
+      return buttons.some(node => {
+        const text = (node.textContent ?? '').trim().toLowerCase()
+        const aria = (node.getAttribute('aria-label') ?? '').trim().toLowerCase()
+        return text === 'sign in' || aria === 'sign in'
+      })
+    })
+
+    if (signInDetected) {
+      throw new Error(
+        'Gemini Web sign-in required. Complete one-time login in the configured profile and retry.',
+      )
+    }
   }
 
   private async submitPrompt(page: Page): Promise<void> {
