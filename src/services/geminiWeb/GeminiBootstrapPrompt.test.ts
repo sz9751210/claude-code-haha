@@ -9,5 +9,6 @@ describe('GeminiBootstrapPrompt', () => {
     expect(prompt).toContain(
       '{"type":"assistant_turn","tool_calls":[],"final_text":"BOOTSTRAP_OK"}',
     )
+    expect(prompt).toContain('do not claim tools are unavailable')
   })
 })

@@ -20,16 +20,56 @@ export class GeminiResponseWaiter {
   constructor(
     private readonly pollIntervalMs = GEMINI_RESPONSE_POLL_INTERVAL_MS,
     private readonly quietWindowMs = GEMINI_RESPONSE_QUIET_WINDOW_MS,
-    private readonly stickyGeneratingWindowMs = Math.max(
-      GEMINI_RESPONSE_QUIET_WINDOW_MS * 4,
-      6_000,
-    ),
     private readonly now: () => number = () => Date.now(),
   ) {}
 
   async getLatestResponseText(page: GeminiPageLike): Promise<string> {
     const snapshot = await this.readSnapshot(page)
     return snapshot.latestResponseText
+  }
+
+  async waitUntilIdle(args: {
+    page: GeminiPageLike
+    signal?: AbortSignal
+    timeoutMs?: number
+  }): Promise<void> {
+    const timeoutMs = args.timeoutMs ?? getGeminiResponseTimeoutMs()
+    const deadline = this.now() + timeoutMs
+    let idleSince = 0
+
+    while (this.now() < deadline) {
+      if (args.signal?.aborted) {
+        throw new Error('Gemini Web request aborted')
+      }
+
+      if (args.page.isClosed()) {
+        throw new Error('Gemini tab was closed before becoming idle')
+      }
+
+      const snapshot = await this.readSnapshot(args.page)
+      if (snapshot.fatalErrorReason) {
+        throw new Error(
+          `Gemini Web returned a fatal page state: ${snapshot.fatalErrorReason}`,
+        )
+      }
+
+      if (!snapshot.isGenerating) {
+        if (idleSince === 0) {
+          idleSince = this.now()
+        }
+        if (this.now() - idleSince >= this.quietWindowMs) {
+          return
+        }
+      } else {
+        idleSince = 0
+      }
+
+      await args.page.waitForTimeout(this.pollIntervalMs)
+    }
+
+    throw new Error(
+      `Timed out waiting for Gemini idle state after ${timeoutMs}ms`,
+    )
   }
 
   async waitForCompletion(args: {
@@ -71,16 +111,8 @@ export class GeminiResponseWaiter {
 
       const hasNewText = text.length > 0 && text !== baseline
       const stableForMs = stableSince > 0 ? this.now() - stableSince : 0
-      if (hasNewText && stableForMs >= this.quietWindowMs) {
-        if (!snapshot.isGenerating) {
-          return text
-        }
-
-        // Some Gemini variants keep a visible "stop generating" control after
-        // output is already complete. Treat long stability as completion.
-        if (stableForMs >= this.stickyGeneratingWindowMs) {
-          return text
-        }
+      if (hasNewText && stableForMs >= this.quietWindowMs && !snapshot.isGenerating) {
+        return text
       }
 
       await args.page.waitForTimeout(this.pollIntervalMs)
@@ -138,13 +170,6 @@ export class GeminiResponseWaiter {
       let fatalErrorReason: string | null = null
       if (url.includes('accounts.google.com')) {
         fatalErrorReason = 'signin_required'
-      } else if (bodyText.includes('something went wrong')) {
-        fatalErrorReason = 'page_error'
-      } else if (
-        bodyText.includes('rate limit') ||
-        bodyText.includes('too many requests')
-      ) {
-        fatalErrorReason = 'rate_limited'
       } else if (bodyText.includes('sign in to gemini')) {
         fatalErrorReason = 'signin_required'
       }

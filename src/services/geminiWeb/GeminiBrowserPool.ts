@@ -28,11 +28,31 @@ const PROMPT_INPUT_SELECTORS = [
 
 const SEND_BUTTON_SELECTORS = [
   'button[aria-label*="Send"]',
+  'button[aria-label*="send"]',
+  'button[aria-label*="送出"]',
+  'button[aria-label*="傳送"]',
   'button[data-testid*="send"]',
+  'button[type="submit"]',
 ]
 
 const PROMPT_INPUT_DISCOVERY_TIMEOUT_MS = 20_000
 const PROMPT_INPUT_RETRY_INTERVAL_MS = 300
+const PROMPT_SEND_CONFIRM_TIMEOUT_MS = 8_000
+const PROMPT_SEND_CONFIRM_POLL_INTERVAL_MS = 250
+const PROMPT_SEND_MAX_ATTEMPTS = 3
+
+const USER_MESSAGE_SELECTORS = [
+  '[data-message-author-role="user"]',
+  '.user-message',
+  '[data-author="user"]',
+]
+
+const GENERATING_STOP_SELECTORS = [
+  'button[aria-label*="Stop"]',
+  'button[aria-label*="stop"]',
+  'button[aria-label*="停止"]',
+  '[data-testid*="stop"]',
+]
 
 function getGeminiHeadless(): boolean {
   return isEnvTruthy(process.env[GEMINI_WEB_HEADLESS_ENV])
@@ -150,9 +170,18 @@ export class GeminiBrowserPool {
     signal?: AbortSignal
   }): Promise<string> {
     await this.ensureGeminiUrl(args.page)
+    await this.responseWaiter.waitUntilIdle({
+      page: args.page,
+      signal: args.signal,
+      timeoutMs: Math.min(args.timeoutMs, 30_000),
+    })
     const baseline = await this.responseWaiter.getLatestResponseText(args.page)
     await this.fillPromptInput(args.page, args.prompt)
-    await this.submitPrompt(args.page)
+    await this.submitPromptWithConfirmation({
+      page: args.page,
+      prompt: args.prompt,
+      signal: args.signal,
+    })
     return this.responseWaiter.waitForCompletion({
       page: args.page,
       signal: args.signal,
@@ -222,22 +251,18 @@ export class GeminiBrowserPool {
           await locator.click({ timeout: 2_500 })
 
           try {
+            await locator.fill('', { timeout: 1_000 })
+          } catch {
+            // Some Gemini variants expose non-fillable editors; fallback below.
+          }
+
+          try {
             await locator.fill(prompt, { timeout: 1_500 })
           } catch {
             // Some Gemini variants expose non-fillable editors; fallback below.
           }
 
           const filled = await locator.evaluate((node, value) => {
-            const currentText =
-              node instanceof HTMLInputElement ||
-              node instanceof HTMLTextAreaElement
-                ? node.value
-                : node.textContent ?? ''
-
-            if (currentText.trim().length > 0) {
-              return true
-            }
-
             if (
               node instanceof HTMLTextAreaElement ||
               node instanceof HTMLInputElement
@@ -245,14 +270,14 @@ export class GeminiBrowserPool {
               node.value = value
               node.dispatchEvent(new Event('input', { bubbles: true }))
               node.dispatchEvent(new Event('change', { bubbles: true }))
-              return node.value.trim().length > 0
+              return node.value.includes(value)
             }
 
             if (node instanceof HTMLElement && node.isContentEditable) {
               node.textContent = value
               node.dispatchEvent(new Event('beforeinput', { bubbles: true }))
               node.dispatchEvent(new Event('input', { bubbles: true }))
-              return (node.textContent ?? '').trim().length > 0
+              return (node.textContent ?? '').includes(value)
             }
 
             return false
@@ -270,7 +295,31 @@ export class GeminiBrowserPool {
     return false
   }
 
-  private async submitPrompt(page: Page): Promise<void> {
+  private async submitPromptWithConfirmation(args: {
+    page: Page
+    prompt: string
+    signal?: AbortSignal
+  }): Promise<void> {
+    const baseline = await this.readSubmissionSnapshot(args.page, args.prompt)
+    for (let attempt = 0; attempt < PROMPT_SEND_MAX_ATTEMPTS; attempt++) {
+      await this.submitPromptAttempt(args.page, attempt)
+      const confirmed = await this.waitForPromptSubmissionConfirmation({
+        page: args.page,
+        prompt: args.prompt,
+        baseline,
+        signal: args.signal,
+      })
+      if (confirmed) {
+        return
+      }
+    }
+
+    throw new Error(
+      'Prompt submission could not be confirmed. Gemini input may still contain unsent text.',
+    )
+  }
+
+  private async submitPromptAttempt(page: Page, attempt: number): Promise<void> {
     for (const selector of SEND_BUTTON_SELECTORS) {
       const button = page.locator(selector).first()
       if ((await button.count()) === 0) {
@@ -288,8 +337,137 @@ export class GeminiBrowserPool {
       }
     }
 
-    await page.keyboard.press('Enter')
+    if (attempt === 0) {
+      await page.keyboard.press('Enter')
+      return
+    }
+    if (attempt === 1) {
+      await page.keyboard.press('Meta+Enter')
+      return
+    }
+    await page.keyboard.press('Control+Enter')
   }
+
+  private async waitForPromptSubmissionConfirmation(args: {
+    page: Page
+    prompt: string
+    baseline: {
+      userMessageCount: number
+      hasPromptInComposer: boolean
+      isGenerating: boolean
+    }
+    signal?: AbortSignal
+  }): Promise<boolean> {
+    const deadline = Date.now() + PROMPT_SEND_CONFIRM_TIMEOUT_MS
+    while (Date.now() < deadline) {
+      if (args.signal?.aborted) {
+        throw new Error('Gemini Web request aborted')
+      }
+
+      const snapshot = await this.readSubmissionSnapshot(args.page, args.prompt)
+
+      const userMessageAdvanced =
+        snapshot.userMessageCount > args.baseline.userMessageCount
+      const composerCleared =
+        args.baseline.hasPromptInComposer && !snapshot.hasPromptInComposer
+      const generationStarted =
+        !args.baseline.isGenerating && snapshot.isGenerating
+
+      if (userMessageAdvanced || composerCleared || generationStarted) {
+        return true
+      }
+
+      await args.page.waitForTimeout(PROMPT_SEND_CONFIRM_POLL_INTERVAL_MS)
+    }
+
+    return false
+  }
+
+  private async readSubmissionSnapshot(
+    page: Page,
+    prompt: string,
+  ): Promise<{
+    userMessageCount: number
+    hasPromptInComposer: boolean
+    isGenerating: boolean
+  }> {
+    const preview = prompt.trim().slice(0, 120)
+    const promptInputSelectors = PROMPT_INPUT_SELECTORS
+    const userMessageSelectors = USER_MESSAGE_SELECTORS
+    const stopSelectors = GENERATING_STOP_SELECTORS
+
+    return page.evaluate(
+      ({ preview, promptInputSelectors, userMessageSelectors, stopSelectors }) => {
+        const normalize = (text: string): string =>
+          text.replace(/\s+/g, ' ').trim()
+
+        const isVisible = (el: Element): boolean => {
+          const style = window.getComputedStyle(el)
+          return (
+            style.display !== 'none' &&
+            style.visibility !== 'hidden' &&
+            (el as HTMLElement).offsetParent !== null
+          )
+        }
+
+        const normalizedPreview = normalize(preview)
+
+        const getComposerText = (): string => {
+          for (const selector of promptInputSelectors) {
+            const nodes = Array.from(document.querySelectorAll(selector))
+            for (const node of nodes) {
+              if (!isVisible(node)) {
+                continue
+              }
+              if (
+                node instanceof HTMLInputElement ||
+                node instanceof HTMLTextAreaElement
+              ) {
+                return node.value ?? ''
+              }
+              return node.textContent ?? ''
+            }
+          }
+          return ''
+        }
+
+        const userMessages: string[] = []
+        for (const selector of userMessageSelectors) {
+          const nodes = Array.from(document.querySelectorAll(selector))
+          for (const node of nodes) {
+            if (!isVisible(node)) {
+              continue
+            }
+            const text = normalize(node.textContent ?? '')
+            if (text.length > 0) {
+              userMessages.push(text)
+            }
+          }
+        }
+
+        const isGenerating = stopSelectors.some(selector =>
+          Array.from(document.querySelectorAll(selector)).some(isVisible),
+        )
+
+        const composerText = normalize(getComposerText())
+        const hasPromptInComposer =
+          normalizedPreview.length > 0 && composerText.includes(normalizedPreview)
+
+        return {
+          userMessageCount: userMessages.length,
+          hasPromptInComposer,
+          isGenerating,
+        }
+      },
+      {
+        preview,
+        promptInputSelectors,
+        userMessageSelectors,
+        stopSelectors,
+      },
+    )
+  }
+
 }
 
 let sharedPool: GeminiBrowserPool | undefined

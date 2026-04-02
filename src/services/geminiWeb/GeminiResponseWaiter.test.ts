@@ -36,6 +36,25 @@ class FakeGeminiPage {
 }
 
 describe('GeminiResponseWaiter', () => {
+  it('waitUntilIdle returns when page is stably not generating', async () => {
+    const clock = { nowMs: 0 }
+    const page = new FakeGeminiPage(
+      [
+        { latestResponseText: '', isGenerating: true, fatalErrorReason: null },
+        { latestResponseText: '', isGenerating: false, fatalErrorReason: null },
+        { latestResponseText: '', isGenerating: false, fatalErrorReason: null },
+        { latestResponseText: '', isGenerating: false, fatalErrorReason: null },
+      ],
+      clock,
+    )
+
+    const waiter = new GeminiResponseWaiter(100, 200, () => clock.nowMs)
+    await waiter.waitUntilIdle({
+      page,
+      timeoutMs: 1_000,
+    })
+  })
+
   it('returns when new text is stable and generation is finished', async () => {
     const clock = { nowMs: 0 }
     const page = new FakeGeminiPage(
@@ -47,7 +66,7 @@ describe('GeminiResponseWaiter', () => {
       clock,
     )
 
-    const waiter = new GeminiResponseWaiter(100, 200, 600, () => clock.nowMs)
+    const waiter = new GeminiResponseWaiter(100, 200, () => clock.nowMs)
     const result = await waiter.waitForCompletion({
       page,
       timeoutMs: 1_000,
@@ -57,7 +76,7 @@ describe('GeminiResponseWaiter', () => {
     expect(result).toBe('done')
   })
 
-  it('returns after sticky window when stop indicator remains visible', async () => {
+  it('times out when generation never finishes', async () => {
     const clock = { nowMs: 0 }
     const page = new FakeGeminiPage(
       Array.from({ length: 10 }, () => ({
@@ -68,15 +87,14 @@ describe('GeminiResponseWaiter', () => {
       clock,
     )
 
-    const waiter = new GeminiResponseWaiter(100, 200, 500, () => clock.nowMs)
-    const result = await waiter.waitForCompletion({
-      page,
-      timeoutMs: 2_000,
-      baselineText: '',
-    })
-
-    expect(result).toBe('still-here')
-    expect(clock.nowMs).toBeGreaterThanOrEqual(500)
+    const waiter = new GeminiResponseWaiter(100, 200, () => clock.nowMs)
+    await expect(
+      waiter.waitForCompletion({
+        page,
+        timeoutMs: 500,
+        baselineText: '',
+      }),
+    ).rejects.toThrow('Timed out waiting for Gemini response completion')
   })
 
   it('throws when page reports a fatal state', async () => {
@@ -92,7 +110,7 @@ describe('GeminiResponseWaiter', () => {
       clock,
     )
 
-    const waiter = new GeminiResponseWaiter(100, 200, 500, () => clock.nowMs)
+    const waiter = new GeminiResponseWaiter(100, 200, () => clock.nowMs)
     await expect(
       waiter.waitForCompletion({
         page,

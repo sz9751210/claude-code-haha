@@ -1,6 +1,6 @@
 import type { BetaContentBlock } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 import type { Options } from '../api/claude.js'
-import { toolToAPISchema } from '../../utils/api.js'
+import type { Tool } from '../../Tool.js'
 import {
   createAssistantAPIErrorMessage,
   createAssistantMessage,
@@ -14,6 +14,7 @@ import type {
 import type { Tools } from '../../Tool.js'
 import type { SystemPrompt } from '../../utils/systemPromptType.js'
 import type { ThinkingConfig } from '../../utils/thinking.js'
+import { zodToJsonSchema } from '../../utils/zodToJsonSchema.js'
 import { buildGeminiBootstrapPrompt } from './GeminiBootstrapPrompt.js'
 import { getGeminiBrowserPool } from './GeminiBrowserPool.js'
 import {
@@ -107,18 +108,92 @@ function formatConversation(messages: Message[]): GeminiConversationMessage[] {
   return result
 }
 
-function formatTools(tools: Tools): GeminiProtocolTool[] {
-  return tools.map(tool => {
-    const schema = toolToAPISchema(tool)
-    return {
-      name: schema.name,
-      description: schema.description,
-      input_schema: (schema.input_schema as Record<string, unknown>) ?? {
-        type: 'object',
-        properties: {},
-      },
+function compactJsonSchema(
+  schema: unknown,
+  depth = 0,
+): Record<string, unknown> | undefined {
+  if (
+    !schema ||
+    typeof schema !== 'object' ||
+    Array.isArray(schema) ||
+    depth > 4
+  ) {
+    return undefined
+  }
+
+  const source = schema as Record<string, unknown>
+  const compact: Record<string, unknown> = {}
+
+  if (typeof source.type === 'string') {
+    compact.type = source.type
+  }
+  if (Array.isArray(source.enum)) {
+    compact.enum = source.enum
+  }
+  if (Array.isArray(source.required)) {
+    compact.required = source.required
+  }
+  if (typeof source.additionalProperties === 'boolean') {
+    compact.additionalProperties = source.additionalProperties
+  }
+
+  if (source.properties && typeof source.properties === 'object') {
+    const entries = Object.entries(source.properties as Record<string, unknown>)
+    const compactProps = Object.fromEntries(
+      entries
+        .map(([key, value]) => [key, compactJsonSchema(value, depth + 1) ?? {}])
+        .filter((entry): entry is [string, Record<string, unknown>] =>
+          Boolean(entry[1]),
+        ),
+    )
+    if (Object.keys(compactProps).length > 0) {
+      compact.properties = compactProps
     }
-  })
+  }
+
+  if (source.items) {
+    const compactItems = compactJsonSchema(source.items, depth + 1)
+    if (compactItems) {
+      compact.items = compactItems
+    }
+  }
+
+  return Object.keys(compact).length > 0 ? compact : undefined
+}
+
+function buildToolInputSchema(tool: Tool): Record<string, unknown> | undefined {
+  const rawSchema =
+    'inputJSONSchema' in tool && tool.inputJSONSchema
+      ? tool.inputJSONSchema
+      : zodToJsonSchema(tool.inputSchema)
+
+  const compact = compactJsonSchema(rawSchema)
+  const props =
+    compact &&
+    compact.type === 'object' &&
+    compact.properties &&
+    typeof compact.properties === 'object'
+      ? (compact.properties as Record<string, unknown>)
+      : undefined
+
+  // For no-arg tools, keep schema empty so prompt payload stays compact.
+  if (!props || Object.keys(props).length === 0) {
+    return undefined
+  }
+
+  return compact
+}
+
+function formatTools(tools: Tools): GeminiProtocolTool[] {
+  return tools
+    .map(tool => {
+      const inputSchema = buildToolInputSchema(tool)
+      return {
+        name: tool.name,
+        ...(inputSchema ? { input_schema: inputSchema } : {}),
+      }
+    })
+    .filter(tool => typeof tool.name === 'string' && tool.name.trim().length > 0)
 }
 
 function turnToContentBlocks(raw: {
