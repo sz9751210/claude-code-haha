@@ -1,3 +1,6 @@
+import os from 'os'
+import path from 'path'
+
 export const GEMINI_WEB_URL = 'https://gemini.google.com/'
 
 export const GEMINI_TAB_MIN_INTERVAL_MS = 5_000
@@ -18,4 +21,12 @@ export function getGeminiResponseTimeoutMs(): number {
   return Number.isFinite(parsed) && parsed > 0
     ? parsed
     : GEMINI_DEFAULT_RESPONSE_TIMEOUT_MS
+}
+
+export function getGeminiProfileDir(): string {
+  const configured = process.env[GEMINI_WEB_PROFILE_DIR_ENV]
+  if (configured && configured.trim().length > 0) {
+    return configured
+  }
+  return path.join(os.homedir(), '.claude-code-haha', 'gemini-web-profile')
 }

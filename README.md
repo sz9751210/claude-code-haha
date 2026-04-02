@@ -203,6 +203,16 @@ bun --env-file=.env ./src/localRecoveryCli.ts
 
 `Gemini Web sign-in required. Complete one-time login in the configured profile and retry.`
 
+可使用下面两个辅助命令：
+
+```bash
+# 一次性人工登录（会打开可见浏览器并复用 GEMINI_WEB_PROFILE_DIR）
+npm run gemini:web:login
+
+# 登录后 smoke 校验 Gemini Web 路径
+npm run gemini:web:smoke
+```
+
 ---
 
 ## 降级模式

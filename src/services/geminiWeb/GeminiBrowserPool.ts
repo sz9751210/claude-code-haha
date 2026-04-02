@@ -1,13 +1,11 @@
 import { mkdir } from 'fs/promises'
-import os from 'os'
-import path from 'path'
 import type { BrowserContext, Page } from 'playwright'
 import { isEnvTruthy } from '../../utils/envUtils.js'
 import { buildGeminiBootstrapPrompt } from './GeminiBootstrapPrompt.js'
 import {
   GEMINI_WEB_HEADLESS_ENV,
-  GEMINI_WEB_PROFILE_DIR_ENV,
   GEMINI_WEB_URL,
+  getGeminiProfileDir,
   getGeminiResponseTimeoutMs,
 } from './GeminiConstants.js'
 import { GeminiResponseWaiter } from './GeminiResponseWaiter.js'
@@ -32,14 +30,6 @@ const SEND_BUTTON_SELECTORS = [
   'button[aria-label*="Send"]',
   'button[data-testid*="send"]',
 ]
-
-function getGeminiProfileDir(): string {
-  const configured = process.env[GEMINI_WEB_PROFILE_DIR_ENV]
-  if (configured && configured.trim().length > 0) {
-    return configured
-  }
-  return path.join(os.homedir(), '.claude-code-haha', 'gemini-web-profile')
-}
 
 function getGeminiHeadless(): boolean {
   return isEnvTruthy(process.env[GEMINI_WEB_HEADLESS_ENV])

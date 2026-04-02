@@ -8,7 +8,9 @@
   },
   "scripts": {
     "claude-haha": "bun run ./bin/claude-haha",
-    "start": "bun run ./bin/claude-haha"
+    "start": "bun run ./bin/claude-haha",
+    "gemini:web:login": "bun run ./src/services/geminiWeb/login.ts",
+    "gemini:web:smoke": "bun run ./src/services/geminiWeb/smoke.ts"
   },
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "^0.0.44",
