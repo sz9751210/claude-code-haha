@@ -1,0 +1,237 @@
+import type { BetaContentBlock } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
+import type { Options } from '../api/claude.js'
+import { toolToAPISchema } from '../../utils/api.js'
+import {
+  createAssistantAPIErrorMessage,
+  createAssistantMessage,
+} from '../../utils/messages.js'
+import type {
+  AssistantMessage,
+  Message,
+  StreamEvent,
+  SystemAPIErrorMessage,
+} from '../../types/message.js'
+import type { Tools } from '../../Tool.js'
+import type { SystemPrompt } from '../../utils/systemPromptType.js'
+import type { ThinkingConfig } from '../../utils/thinking.js'
+import { buildGeminiBootstrapPrompt } from './GeminiBootstrapPrompt.js'
+import { getGeminiBrowserPool } from './GeminiBrowserPool.js'
+import { GEMINI_PROTOCOL_MAX_REPAIR_ATTEMPTS } from './GeminiConstants.js'
+import {
+  buildGeminiProtocolRepairPrompt,
+  buildGeminiTurnPrompt,
+  parseGeminiAssistantTurn,
+  type GeminiConversationMessage,
+  type GeminiProtocolTool,
+} from './GeminiProtocol.js'
+import { getGeminiSessionKey } from './GeminiSessionRouter.js'
+
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return '[unserializable]'
+  }
+}
+
+function formatContentBlocks(content: unknown): string {
+  if (typeof content === 'string') {
+    return content
+  }
+
+  if (!Array.isArray(content)) {
+    return ''
+  }
+
+  return content
+    .map(block => {
+      if (!block || typeof block !== 'object') {
+        return ''
+      }
+
+      const typedBlock = block as { type?: string; [k: string]: unknown }
+      if (typedBlock.type === 'text') {
+        return typeof typedBlock.text === 'string' ? typedBlock.text : ''
+      }
+      if (typedBlock.type === 'tool_use') {
+        return `[tool_use] name=${String(
+          typedBlock.name ?? '',
+        )} id=${String(typedBlock.id ?? '')} input=${safeStringify(
+          typedBlock.input,
+        )}`
+      }
+      if (typedBlock.type === 'tool_result') {
+        return `[tool_result] tool_use_id=${String(
+          typedBlock.tool_use_id ?? '',
+        )} content=${safeStringify(typedBlock.content)}`
+      }
+
+      return `[${String(typedBlock.type ?? 'unknown')}]`
+    })
+    .filter(line => line.length > 0)
+    .join('\n')
+}
+
+function formatConversation(messages: Message[]): GeminiConversationMessage[] {
+  const result: GeminiConversationMessage[] = []
+
+  for (const message of messages) {
+    if (!('message' in message)) {
+      continue
+    }
+
+    const role =
+      message.type === 'assistant'
+        ? 'assistant'
+        : message.type === 'system'
+          ? 'system'
+          : 'user'
+
+    const content = formatContentBlocks(
+      (message as { message?: { content?: unknown } }).message?.content,
+    )
+    if (!content || content.trim().length === 0) {
+      continue
+    }
+
+    result.push({
+      role,
+      content,
+    })
+  }
+
+  return result
+}
+
+function formatTools(tools: Tools): GeminiProtocolTool[] {
+  return tools.map(tool => {
+    const schema = toolToAPISchema(tool)
+    return {
+      name: schema.name,
+      description: schema.description,
+      input_schema: (schema.input_schema as Record<string, unknown>) ?? {
+        type: 'object',
+        properties: {},
+      },
+    }
+  })
+}
+
+function turnToContentBlocks(raw: {
+  tool_calls: Array<{ id: string; name: string; input: Record<string, unknown> }>
+  final_text: string
+}): BetaContentBlock[] {
+  const content: BetaContentBlock[] = []
+
+  for (const toolCall of raw.tool_calls) {
+    content.push({
+      type: 'tool_use',
+      id: toolCall.id,
+      name: toolCall.name,
+      input: toolCall.input,
+    } as BetaContentBlock)
+  }
+
+  if (raw.final_text.trim().length > 0) {
+    content.push({
+      type: 'text',
+      text: raw.final_text,
+    } as BetaContentBlock)
+  }
+
+  return content.length > 0
+    ? content
+    : ([
+        {
+          type: 'text',
+          text: '[Gemini Web returned empty content]',
+        } as BetaContentBlock,
+      ] as BetaContentBlock[])
+}
+
+function buildInitialPrompt(args: {
+  systemPrompt: SystemPrompt
+  messages: Message[]
+  protocolTools: GeminiProtocolTool[]
+}): string {
+  return buildGeminiTurnPrompt({
+    systemPrompt: args.systemPrompt.join('\n\n'),
+    conversation: formatConversation(args.messages),
+    tools: args.protocolTools,
+  })
+}
+
+export async function* queryModelWithGeminiWebNonStreaming({
+  messages,
+  systemPrompt,
+  thinkingConfig: _thinkingConfig,
+  tools,
+  signal,
+  options,
+}: {
+  messages: Message[]
+  systemPrompt: SystemPrompt
+  thinkingConfig: ThinkingConfig
+  tools: Tools
+  signal: AbortSignal
+  options: Options
+}): AsyncGenerator<
+  StreamEvent | AssistantMessage | SystemAPIErrorMessage,
+  void
+> {
+  const browserPool = getGeminiBrowserPool()
+  const sessionKey = getGeminiSessionKey(options.agentId)
+  const bootstrapPrompt = buildGeminiBootstrapPrompt()
+  const protocolTools = formatTools(tools)
+  const initialPrompt = buildInitialPrompt({
+    systemPrompt,
+    messages,
+    protocolTools,
+  })
+  const allowedToolNames = new Set(protocolTools.map(tool => tool.name))
+
+  let promptToSend = initialPrompt
+  try {
+    for (let repairAttempt = 0; ; repairAttempt++) {
+      const rawResponse = await browserPool.sendPromptAndWait({
+        sessionKey,
+        prompt: promptToSend,
+        signal,
+        bootstrapPrompt,
+      })
+
+      const parsed = parseGeminiAssistantTurn(rawResponse, {
+        allowedToolNames,
+      })
+      if (parsed.ok) {
+        yield createAssistantMessage({
+          content: turnToContentBlocks(parsed.value),
+        })
+        return
+      }
+
+      if (repairAttempt >= GEMINI_PROTOCOL_MAX_REPAIR_ATTEMPTS) {
+        yield createAssistantAPIErrorMessage({
+          content: `Gemini Web protocol parsing failed after ${GEMINI_PROTOCOL_MAX_REPAIR_ATTEMPTS} retries: ${parsed.error}`,
+        })
+        return
+      }
+
+      promptToSend = buildGeminiProtocolRepairPrompt({
+        originalPrompt: initialPrompt,
+        failureReason: parsed.error,
+        previousResponse: rawResponse,
+      })
+    }
+  } catch (error) {
+    if (signal.aborted) {
+      return
+    }
+
+    yield createAssistantAPIErrorMessage({
+      content: `Gemini Web provider error: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    })
+  }
+}

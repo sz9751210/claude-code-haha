@@ -109,6 +109,13 @@ API_TIMEOUT_MS=3000000
 # 禁用遥测和非必要网络请求
 DISABLE_TELEMETRY=1
 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+
+# Gemini Web Provider（显式切换才启用）
+CLAUDE_CODE_USE_GEMINI_WEB=1
+# 首次手动登录后复用本地浏览器 profile/cookie
+GEMINI_WEB_PROFILE_DIR=~/.claude-code-haha/gemini-web-profile
+# 可选：无头模式（默认 0，建议首次登录时保持 0）
+GEMINI_WEB_HEADLESS=0
 ```
 
 ### 4. 启动
@@ -173,6 +180,24 @@ bun --env-file=.env ./src/localRecoveryCli.ts
 | `API_TIMEOUT_MS` | 否 | API 请求超时，默认 600000 (10min) |
 | `DISABLE_TELEMETRY` | 否 | 设为 `1` 禁用遥测 |
 | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | 否 | 设为 `1` 禁用非必要网络请求 |
+| `CLAUDE_CODE_USE_GEMINI_WEB` | 否 | 设为 `1` 时显式切换到 Gemini Web Provider（Playwright） |
+| `GEMINI_WEB_PROFILE_DIR` | 否 | Gemini Web 持久化 profile 路径（用于复用登录态/cookie） |
+| `GEMINI_WEB_HEADLESS` | 否 | 设为 `1` 使用无头模式（首次登录建议 `0`） |
+| `GEMINI_WEB_RESPONSE_TIMEOUT_MS` | 否 | Gemini Web 单轮等待超时，默认 120000ms |
+
+---
+
+## Gemini Web Provider（Playwright）
+
+当 `CLAUDE_CODE_USE_GEMINI_WEB=1` 时，模型请求会固定走 `https://gemini.google.com/`，并启用以下行为：
+
+- 非串流：等待 Gemini 完整回复后一次性返回
+- 结构化输出协议：强制 JSON，可解析失败自动重试
+- 完整工具循环：支持单轮多个 tool call
+- 多代理隔离：主线程与子代理使用不同标签页
+- 新标签页最小间隔：每次新开页至少 5 秒
+
+首次使用请先在持久化 profile 下手动登录 Google 账号一次，后续会自动复用本地登录态。
 
 ---
 

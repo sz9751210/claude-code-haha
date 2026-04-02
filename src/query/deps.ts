@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto'
+import { getAPIProvider } from '../utils/model/providers.js'
 import { queryModelWithStreaming } from '../services/api/claude.js'
 import { autoCompactIfNeeded } from '../services/compact/autoCompact.js'
 import { microcompactMessages } from '../services/compact/microCompact.js'
@@ -18,6 +19,16 @@ import { microcompactMessages } from '../services/compact/microCompact.js'
 //
 // Scope is intentionally narrow (4 deps) to prove the pattern. Followup
 // PRs can add runTools, handleStopHooks, logEvent, queue ops, etc.
+const queryModelWithGeminiWebNonStreaming: typeof queryModelWithStreaming =
+  async function* (params) {
+    const {
+      queryModelWithGeminiWebNonStreaming: queryModelWithGeminiWeb,
+    } = await import(
+      '../services/geminiWeb/queryModelWithGeminiWebNonStreaming.js'
+    )
+    yield* queryModelWithGeminiWeb(params)
+  }
+
 export type QueryDeps = {
   // -- model
   callModel: typeof queryModelWithStreaming
@@ -31,8 +42,13 @@ export type QueryDeps = {
 }
 
 export function productionDeps(): QueryDeps {
+  const callModel =
+    getAPIProvider() === 'geminiWeb'
+      ? queryModelWithGeminiWebNonStreaming
+      : queryModelWithStreaming
+
   return {
-    callModel: queryModelWithStreaming,
+    callModel,
     microcompact: microcompactMessages,
     autocompact: autoCompactIfNeeded,
     uuid: randomUUID,
