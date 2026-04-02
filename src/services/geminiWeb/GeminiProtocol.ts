@@ -26,7 +26,6 @@ export type GeminiProtocolParseResult =
   | { ok: false; error: string }
 
 const GEMINI_MAX_SYSTEM_PROMPT_CHARS = 1_200
-const GEMINI_MAX_CONVERSATION_MESSAGES = 8
 const GEMINI_MAX_MESSAGE_CHARS = 6_000
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -197,12 +196,10 @@ export function buildGeminiTurnPrompt(args: {
   conversation: GeminiConversationMessage[]
   tools: GeminiProtocolTool[]
 }): string {
-  const compactConversation = args.conversation
-    .slice(-GEMINI_MAX_CONVERSATION_MESSAGES)
-    .map(message => ({
-      role: message.role,
-      content: compactText(message.content, GEMINI_MAX_MESSAGE_CHARS),
-    }))
+  const compactConversation = args.conversation.map(message => ({
+    role: message.role,
+    content: compactText(message.content, GEMINI_MAX_MESSAGE_CHARS),
+  }))
 
   const compactSystemPrompt = compactText(
     args.systemPrompt,

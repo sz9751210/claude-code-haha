@@ -16,6 +16,10 @@ import type { SystemPrompt } from '../../utils/systemPromptType.js'
 import type { ThinkingConfig } from '../../utils/thinking.js'
 import { buildGeminiBootstrapPrompt } from './GeminiBootstrapPrompt.js'
 import { getGeminiBrowserPool } from './GeminiBrowserPool.js'
+import {
+  commitGeminiConversationSnapshot,
+  planGeminiConversationDelta,
+} from './GeminiConversationDelta.js'
 import { GEMINI_PROTOCOL_MAX_REPAIR_ATTEMPTS } from './GeminiConstants.js'
 import {
   buildGeminiProtocolRepairPrompt,
@@ -151,12 +155,12 @@ function turnToContentBlocks(raw: {
 
 function buildInitialPrompt(args: {
   systemPrompt: SystemPrompt
-  messages: Message[]
+  conversation: GeminiConversationMessage[]
   protocolTools: GeminiProtocolTool[]
 }): string {
   return buildGeminiTurnPrompt({
     systemPrompt: args.systemPrompt.join('\n\n'),
-    conversation: formatConversation(args.messages),
+    conversation: args.conversation,
     tools: args.protocolTools,
   })
 }
@@ -183,15 +187,27 @@ export async function* queryModelWithGeminiWebNonStreaming({
   const sessionKey = getGeminiSessionKey(options.agentId)
   const bootstrapPrompt = buildGeminiBootstrapPrompt()
   const protocolTools = formatTools(tools)
-  const initialPrompt = buildInitialPrompt({
-    systemPrompt,
-    messages,
-    protocolTools,
-  })
   const allowedToolNames = new Set(protocolTools.map(tool => tool.name))
-
-  let promptToSend = initialPrompt
   try {
+    const fullConversation = formatConversation(messages)
+    const forceFullSync = !(await browserPool.isSessionInitialized(sessionKey))
+    const deltaPlan = planGeminiConversationDelta({
+      sessionKey,
+      conversation: fullConversation,
+      forceFullSync,
+    })
+    const conversationForPrompt =
+      deltaPlan.deltaConversation.length > 0
+        ? deltaPlan.deltaConversation
+        : fullConversation.slice(-1)
+    const initialPrompt = buildInitialPrompt({
+      systemPrompt,
+      conversation: conversationForPrompt,
+      protocolTools,
+    })
+
+    let promptToSend = initialPrompt
+    let didCommitConversation = false
     for (let repairAttempt = 0; ; repairAttempt++) {
       const rawResponse = await browserPool.sendPromptAndWait({
         sessionKey,
@@ -199,6 +215,10 @@ export async function* queryModelWithGeminiWebNonStreaming({
         signal,
         bootstrapPrompt,
       })
+      if (!didCommitConversation) {
+        commitGeminiConversationSnapshot(sessionKey, deltaPlan.snapshot)
+        didCommitConversation = true
+      }
 
       const parsed = parseGeminiAssistantTurn(rawResponse, {
         allowedToolNames,

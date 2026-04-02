@@ -45,6 +45,11 @@ export class GeminiBrowserPool {
   private readonly responseWaiter = new GeminiResponseWaiter()
   private readonly sessionLocks = new Map<GeminiSessionKey, Promise<unknown>>()
 
+  async isSessionInitialized(sessionKey: GeminiSessionKey): Promise<boolean> {
+    const session = await this.ensureSession(sessionKey)
+    return session.initialized
+  }
+
   async sendPromptAndWait(args: {
     sessionKey: GeminiSessionKey
     prompt: string
