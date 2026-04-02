@@ -197,11 +197,8 @@ bun --env-file=.env ./src/localRecoveryCli.ts
 - 多代理隔离：主线程与子代理使用不同标签页
 - 新标签页最小间隔：每次新开页至少 5 秒
 
-首次使用请先在持久化 profile 下手动登录 Google 账号一次，后续会自动复用本地登录态。
-
-如果 profile 尚未登录，Gemini Web 路径会快速返回：
-
-`Gemini Web sign-in required. Complete one-time login in the configured profile and retry.`
+Gemini Web 路径默认会直接尝试运行（未登录也会先尝试）。
+如果你希望复用稳定的已登录态，再执行一次人工登录并保存到 profile。
 
 可使用下面两个辅助命令：
 
@@ -209,7 +206,7 @@ bun --env-file=.env ./src/localRecoveryCli.ts
 # 一次性人工登录（会打开可见浏览器并复用 GEMINI_WEB_PROFILE_DIR）
 npm run gemini:web:login
 
-# 登录后 smoke 校验 Gemini Web 路径
+# smoke 校验 Gemini Web 路径（可在登录前后都执行）
 npm run gemini:web:smoke
 ```
 

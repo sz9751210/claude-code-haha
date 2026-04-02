@@ -142,7 +142,6 @@ export class GeminiBrowserPool {
     signal?: AbortSignal
   }): Promise<string> {
     await this.ensureGeminiUrl(args.page)
-    await this.assertSignedIn(args.page)
     const baseline = await this.responseWaiter.getLatestResponseText(args.page)
     await this.fillPromptInput(args.page, args.prompt)
     await this.submitPrompt(args.page)
@@ -208,48 +207,9 @@ export class GeminiBrowserPool {
       }
     }
 
-    const signInDetected = await page.evaluate(() => {
-      const nodes = Array.from(document.querySelectorAll('a,button'))
-      return nodes.some(node => {
-        const text = (node.textContent ?? '').toLowerCase()
-        const aria = (node.getAttribute('aria-label') ?? '').toLowerCase()
-        return text.includes('sign in') || aria.includes('sign in')
-      })
-    })
-
-    if (signInDetected) {
-      throw new Error(
-        'Gemini Web sign-in required. Complete one-time login in the configured profile and retry.',
-      )
-    }
-
     throw new Error(
-      'Unable to locate Gemini prompt input. Ensure Gemini page is loaded and logged in.',
+      'Unable to locate Gemini prompt input. Ensure Gemini page is loaded.',
     )
-  }
-
-  private async assertSignedIn(page: Page): Promise<void> {
-    const signInDetected = await page.evaluate(() => {
-      const signInLink = document.querySelector(
-        'a[aria-label="Sign in"], a[href*="accounts.google.com/ServiceLogin"]',
-      )
-      if (signInLink) {
-        return true
-      }
-
-      const buttons = Array.from(document.querySelectorAll('button,a'))
-      return buttons.some(node => {
-        const text = (node.textContent ?? '').trim().toLowerCase()
-        const aria = (node.getAttribute('aria-label') ?? '').trim().toLowerCase()
-        return text === 'sign in' || aria === 'sign in'
-      })
-    })
-
-    if (signInDetected) {
-      throw new Error(
-        'Gemini Web sign-in required. Complete one-time login in the configured profile and retry.',
-      )
-    }
   }
 
   private async submitPrompt(page: Page): Promise<void> {
