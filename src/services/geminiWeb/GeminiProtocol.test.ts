@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'bun:test'
-import { parseGeminiAssistantTurn } from './GeminiProtocol.js'
+import {
+  buildGeminiTurnPrompt,
+  parseGeminiAssistantTurn,
+} from './GeminiProtocol.js'
 
 describe('GeminiProtocol', () => {
   it('parses final-text turns', () => {
@@ -81,5 +84,27 @@ describe('GeminiProtocol', () => {
     )
 
     expect(parsed.ok).toBe(true)
+  })
+
+  it('builds a compact turn prompt with bounded context', () => {
+    const prompt = buildGeminiTurnPrompt({
+      systemPrompt: 'x'.repeat(3_000),
+      conversation: [
+        { role: 'user', content: 'hello' },
+        { role: 'assistant', content: 'world' },
+      ],
+      tools: [
+        {
+          name: 'Bash',
+          description: 'run shell',
+          input_schema: { type: 'object', properties: { cmd: { type: 'string' } } },
+        },
+      ],
+    })
+
+    expect(prompt).toContain('Return JSON only.')
+    expect(prompt).toContain('system_prompt_excerpt')
+    expect(prompt).toContain('...[truncated]')
+    expect(prompt).not.toContain('Return strict JSON only, without markdown fences.')
   })
 })

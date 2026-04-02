@@ -25,6 +25,10 @@ export type GeminiProtocolParseResult =
   | { ok: true; value: GeminiAssistantTurn }
   | { ok: false; error: string }
 
+const GEMINI_MAX_SYSTEM_PROMPT_CHARS = 1_200
+const GEMINI_MAX_CONVERSATION_MESSAGES = 8
+const GEMINI_MAX_MESSAGE_CHARS = 6_000
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -34,6 +38,18 @@ function truncate(text: string, max = 2_000): string {
     return text
   }
   return `${text.slice(0, max)}\n...[truncated]`
+}
+
+function normalizeWhitespace(text: string): string {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+function compactText(text: string, maxChars: number): string {
+  const normalized = normalizeWhitespace(text)
+  if (normalized.length <= maxChars) {
+    return normalized
+  }
+  return `${normalized.slice(0, maxChars)}...[truncated]`
 }
 
 function extractJsonCandidate(raw: string): string {
@@ -181,24 +197,30 @@ export function buildGeminiTurnPrompt(args: {
   conversation: GeminiConversationMessage[]
   tools: GeminiProtocolTool[]
 }): string {
+  const compactConversation = args.conversation
+    .slice(-GEMINI_MAX_CONVERSATION_MESSAGES)
+    .map(message => ({
+      role: message.role,
+      content: compactText(message.content, GEMINI_MAX_MESSAGE_CHARS),
+    }))
+
+  const compactSystemPrompt = compactText(
+    args.systemPrompt,
+    GEMINI_MAX_SYSTEM_PROMPT_CHARS,
+  )
+
   const payload = {
     protocol: 'gemini_web_tool_loop_v1',
-    system_prompt: args.systemPrompt,
-    conversation: args.conversation,
+    system_prompt_excerpt: compactSystemPrompt,
+    conversation: compactConversation,
     tools: args.tools,
   }
 
   return [
-    'Return strict JSON only, without markdown fences.',
+    'Return JSON only.',
     'Schema: {"type":"assistant_turn","tool_calls":[{"id":"call_1","name":"ToolName","input":{"k":"v"}}],"final_text":"..."}',
-    'Rules:',
-    '- type must be assistant_turn',
-    '- support multiple tool calls in one response',
-    '- if no tool_calls, final_text must be non-empty',
-    '- if tool_calls exist, final_text may be empty',
-    '- tool names must match provided tools exactly',
-    'Request payload:',
-    JSON.stringify(payload),
+    'Rules: type=assistant_turn; support multiple tool calls; if tool_calls is empty final_text must be non-empty; if tool_calls is non-empty final_text may be empty; tool names must match exactly.',
+    `Payload: ${JSON.stringify(payload)}`,
   ].join('\n\n')
 }
 
